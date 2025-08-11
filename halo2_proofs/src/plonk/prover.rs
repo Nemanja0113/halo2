@@ -35,6 +35,7 @@ use crate::{
     plonk::Assigned,
     poly::{
         commitment::{Blind, CommitmentScheme, Params, Prover},
+        commitment::batched::{BatchedMSMConfig, BatchedMsmManager, BatchedResult, BatchedMSMStats},
         Basis, Coeff, LagrangeCoeff, Polynomial, ProverQuery,
     },
 };
@@ -83,6 +84,30 @@ where
     
     // Reset FFT statistics at the beginning of proof generation
     crate::arithmetic::reset_fft_stats();
+
+    // Initialize batched MSM configuration
+    let batched_config = BatchedMSMConfig {
+        enabled: std::env::var("HALO2_MSM_BATCHING").is_ok(),
+        max_batch_size: std::env::var("HALO2_MSM_BATCH_SIZE")
+            .unwrap_or_else(|_| "16".to_string())
+            .parse()
+            .unwrap_or(16),
+        gpu_threshold: std::env::var("HALO2_MSM_GPU_THRESHOLD")
+            .unwrap_or_else(|_| "1024".to_string())
+            .parse()
+            .unwrap_or(1024),
+        gpu_batch_threshold: std::env::var("HALO2_MSM_GPU_BATCH_THRESHOLD")
+            .unwrap_or_else(|_| "4".to_string())
+            .parse()
+            .unwrap_or(4),
+        force_gpu_for_large_batches: std::env::var("HALO2_MSM_FORCE_GPU").is_ok(),
+    };
+
+    let batched_msm_manager = BatchedMsmManager::new(batched_config);
+    
+    if batched_config.enabled {
+        log::info!("🚀 [BATCHING] MSM batching enabled with config: {:?}", batched_config);
+    }
 
     if circuits.len() != instances.len() {
         return Err(Error::InvalidInstances);
@@ -329,6 +354,12 @@ where
 
     // Phase 3: Witness Collection and Advice Preparation
     let phase3_start = Instant::now();
+    
+    // Start batched MSM phase for witness collection
+    if batched_config.enabled {
+        batched_msm_manager.start_phase_batch("witness_collection");
+    }
+    
     let (advice, challenges) = {
         let mut advice = vec![
             AdviceSingle::<Scheme::Curve, LagrangeCoeff> {
@@ -482,6 +513,14 @@ where
     // Phase 4: Lookup Preparation
     let phase4_start = Instant::now();
     
+    // End previous batched MSM phase and start new one for lookup preparation
+    if batched_config.enabled {
+        if let Some(result) = batched_msm_manager.end_phase_batch() {
+            log::info!("🔄 [BATCHED_MSM] Witness collection phase completed: {:?}", result);
+        }
+        batched_msm_manager.start_phase_batch("lookup_preparation");
+    }
+    
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
 
@@ -553,6 +592,14 @@ where
 
     // Phase 5: Permutation Commitment
     let phase5_start = Instant::now();
+    
+    // End previous batched MSM phase and start new one for permutation commitment
+    if batched_config.enabled {
+        if let Some(result) = batched_msm_manager.end_phase_batch() {
+            log::info!("🔄 [BATCHED_MSM] Lookup preparation phase completed: {:?}", result);
+        }
+        batched_msm_manager.start_phase_batch("permutation_commitment");
+    }
     
     // Sample beta challenge
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
@@ -629,6 +676,15 @@ where
 
     // Phase 6: Lookup Product Commitments
     let phase6_start = Instant::now();
+    
+    // End previous batched MSM phase and start new one for lookup product commitments
+    if batched_config.enabled {
+        if let Some(result) = batched_msm_manager.end_phase_batch() {
+            log::info!("🔄 [BATCHED_MSM] Permutation commitment phase completed: {:?}", result);
+        }
+        batched_msm_manager.start_phase_batch("lookup_product_commitments");
+    }
+    
     let lookups = commit_lookups()?;
 
     #[cfg(feature = "mv-lookup")]
@@ -644,6 +700,15 @@ where
 
     // Phase 7: Shuffle Commitments
     let phase7_start = Instant::now();
+    
+    // End previous batched MSM phase and start new one for shuffle commitments
+    if batched_config.enabled {
+        if let Some(result) = batched_msm_manager.end_phase_batch() {
+            log::info!("🔄 [BATCHED_MSM] Lookup product commitments phase completed: {:?}", result);
+        }
+        batched_msm_manager.start_phase_batch("shuffle_commitments");
+    }
+    
     let shuffles: Vec<Vec<shuffle::prover::Committed<Scheme::Curve>>> = instance
         .iter()
         .zip(advice.iter())
@@ -675,6 +740,14 @@ where
 
     // Phase 8: Vanishing Argument
     let phase8_start = Instant::now();
+    
+    // End previous batched MSM phase and start new one for vanishing argument
+    if batched_config.enabled {
+        if let Some(result) = batched_msm_manager.end_phase_batch() {
+            log::info!("🔄 [BATCHED_MSM] Shuffle commitments phase completed: {:?}", result);
+        }
+        batched_msm_manager.start_phase_batch("vanishing_argument");
+    }
     
     // Commit to the vanishing argument's random polynomial for blinding h(x_3)
     let vanishing = vanishing::Argument::commit(params, domain, &mut rng, transcript)?;
@@ -729,6 +802,14 @@ where
 
     // Phase 9: Challenge Generation and Evaluation
     let phase9_start = Instant::now();
+    
+    // End previous batched MSM phase and start new one for challenge generation
+    if batched_config.enabled {
+        if let Some(result) = batched_msm_manager.end_phase_batch() {
+            log::info!("🔄 [BATCHED_MSM] Vanishing argument phase completed: {:?}", result);
+        }
+        batched_msm_manager.start_phase_batch("challenge_generation");
+    }
     
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
     let xn = x.pow([params.n()]);
@@ -900,6 +981,13 @@ where
     // Phase 10: Final Multi-Open Proof
     let phase10_start = Instant::now();
     
+    // End final batched MSM phase
+    if batched_config.enabled {
+        if let Some(result) = batched_msm_manager.end_phase_batch() {
+            log::info!("🔄 [BATCHED_MSM] Challenge generation phase completed: {:?}", result);
+        }
+    }
+    
     let prover = P::new(params);
     let result = prover
         .create_proof(rng, transcript, instances)
@@ -929,6 +1017,23 @@ where
                total_fft_time, (total_fft_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 100.0);
     if total_fft_count > 0 {
         log::info!("📊 [FFT_STATS] Average FFT time: {:?}", total_fft_time / total_fft_count as u32);
+    }
+    
+    // Print batched MSM statistics
+    if batched_config.enabled {
+        if let Some(stats) = batched_msm_manager.get_stats() {
+            log::info!("📊 [BATCHED_MSM_STATS] Total operations: {}, Total elements: {}", 
+                       stats.total_operations, stats.total_elements);
+            log::info!("📊 [BATCHED_MSM_STATS] Total batches: {} (GPU: {}, CPU: {})", 
+                       stats.total_batches, stats.total_gpu_batches, stats.total_cpu_batches);
+            log::info!("📊 [BATCHED_MSM_STATS] Total processing time: {:?} ({:.2}% of total)", 
+                       stats.total_processing_time, 
+                       (stats.total_processing_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 100.0);
+            if stats.total_batches > 0 {
+                log::info!("📊 [BATCHED_MSM_STATS] Average batch time: {:?}", 
+                           stats.total_processing_time / stats.total_batches as u32);
+            }
+        }
     }
     
     result

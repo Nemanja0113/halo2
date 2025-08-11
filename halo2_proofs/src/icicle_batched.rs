@@ -36,19 +36,19 @@ pub fn batched_msm_gpu<C: CurveAffine>(
     log::debug!("🚀 Starting batched GPU MSM: {} batches, {} total operations", 
                batch_sizes.len(), total_expected);
 
-    #[cfg(feature = "icicle")]
+    #[cfg(feature = "icicle_gpu")]
     {
         batched_msm_icicle(bases, scalars, batch_sizes, start)
     }
     
-    #[cfg(not(feature = "icicle"))]
+    #[cfg(not(feature = "icicle_gpu"))]
     {
         log::warn!("ICICLE not available, using CPU fallback");
         batched_msm_cpu_fallback(bases, scalars, batch_sizes)
     }
 }
 
-#[cfg(feature = "icicle")]
+#[cfg(feature = "icicle_gpu")]
 fn batched_msm_icicle<C: CurveAffine>(
     bases: &[C],
     scalars: &[C::Scalar],
@@ -101,7 +101,7 @@ fn batched_msm_icicle<C: CurveAffine>(
     Ok(results)
 }
 
-#[cfg(not(feature = "icicle"))]
+#[cfg(not(feature = "icicle_gpu"))]
 fn batched_msm_cpu_fallback<C: CurveAffine>(
     bases: &[C],
     scalars: &[C::Scalar],

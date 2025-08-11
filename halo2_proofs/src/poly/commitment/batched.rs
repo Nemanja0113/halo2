@@ -4,6 +4,56 @@ use group::Curve;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use super::{Blind, Polynomial, LagrangeCoeff};
+use instant::Instant;
+
+use lazy_static::lazy_static;
+
+/// Configuration for batched MSM operations
+#[derive(Debug, Clone)]
+pub struct BatchedMSMConfig {
+    /// Enable/disable batching globally
+    pub enabled: bool,
+    /// Maximum number of operations to batch before auto-flush
+    pub max_batch_size: usize,
+    /// Minimum total elements to trigger GPU batching
+    pub gpu_threshold: usize,
+    /// Minimum batch size to trigger GPU batching
+    pub gpu_batch_threshold: usize,
+    /// Whether to force GPU usage for large batches
+    pub force_gpu_for_large_batches: bool,
+}
+
+impl Default for BatchedMSMConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_batch_size: 16,
+            gpu_threshold: 1024,
+            gpu_batch_threshold: 4,
+            force_gpu_for_large_batches: true,
+        }
+    }
+}
+
+/// Individual MSM operation to be batched
+#[derive(Debug, Clone)]
+pub struct MSMOperation<C: CurveAffine> {
+    pub coeffs: Vec<C::Scalar>,
+    pub bases: Vec<C>,
+    pub operation_id: String,
+    pub phase: String,
+    pub priority: u8, // Higher number = higher priority
+}
+
+/// Result of a batched MSM operation
+#[derive(Debug)]
+pub struct BatchedResult<C: CurveAffine> {
+    pub results: Vec<C::Curve>,
+    pub operation_ids: Vec<String>,
+    pub total_elements: usize,
+    pub processing_time: std::time::Duration,
+    pub used_gpu: bool,
+}
 
 /// Batched MSM accumulator that collects multiple MSM operations
 /// and processes them together for better GPU utilization
@@ -11,33 +61,34 @@ use super::{Blind, Polynomial, LagrangeCoeff};
 pub struct BatchedMSM<C: CurveAffine> {
     /// Queue of pending MSM operations
     operations: VecDeque<MSMOperation<C>>,
-    /// Maximum batch size before auto-flush
-    max_batch_size: usize,
+    /// Configuration for batching behavior
+    config: BatchedMSMConfig,
     /// Current phase identifier for logging
     current_phase: String,
+    /// Statistics tracking
+    stats: BatchedMSMStats,
 }
 
-#[derive(Debug, Clone)]
-struct MSMOperation<C: CurveAffine> {
-    coeffs: Vec<C::Scalar>,
-    bases: Vec<C>,
-    operation_id: String,
-}
-
-#[derive(Debug)]
-pub struct BatchedResult<C: CurveAffine> {
-    pub results: Vec<C::Curve>,
-    pub operation_ids: Vec<String>,
+#[derive(Debug, Default, Clone)]
+pub struct BatchedMSMStats {
+    pub total_operations: usize,
+    pub total_elements: usize,
+    pub total_batches: usize,
+    pub total_gpu_batches: usize,
+    pub total_cpu_batches: usize,
+    pub total_processing_time: std::time::Duration,
 }
 
 impl<C: CurveAffine> BatchedMSM<C> {
     /// Create a new batched MSM accumulator
-    pub fn new(phase_name: &str, max_batch_size: usize) -> Self {
-        log::info!("🔄 [BATCHED_MSM] Initializing for phase: {}", phase_name);
+    pub fn new(phase_name: &str, config: BatchedMSMConfig) -> Self {
+        log::info!("🔄 [BATCHED_MSM] Initializing for phase: {} with config: {:?}", 
+                   phase_name, config);
         Self {
             operations: VecDeque::new(),
-            max_batch_size,
+            config,
             current_phase: phase_name.to_string(),
+            stats: BatchedMSMStats::default(),
         }
     }
 
@@ -47,20 +98,37 @@ impl<C: CurveAffine> BatchedMSM<C> {
         coeffs: Vec<C::Scalar>,
         bases: Vec<C>,
         operation_id: String,
+        priority: u8,
     ) {
-        log::debug!("📝 [BATCHED_MSM] Adding operation '{}': {} elements", 
-                   operation_id, coeffs.len());
+        if !self.config.enabled {
+            // If batching is disabled, process immediately
+            let start = Instant::now();
+            let result = best_multiexp(&coeffs, &bases);
+            let elapsed = start.elapsed();
+            log::debug!("⚡ [MSM_IMMEDIATE] {}: {} elements in {:?}", 
+                       operation_id, coeffs.len(), elapsed);
+            return;
+        }
+
+        log::debug!("📝 [BATCHED_MSM] Adding operation '{}': {} elements (priority: {})", 
+                   operation_id, coeffs.len(), priority);
         
         self.operations.push_back(MSMOperation {
             coeffs,
             bases,
             operation_id,
+            phase: self.current_phase.clone(),
+            priority,
         });
 
+        self.stats.total_operations += 1;
+        self.stats.total_elements += coeffs.len();
+
         // Auto-flush if we hit the batch size limit
-        if self.operations.len() >= self.max_batch_size {
-            log::warn!("⚠️ [BATCHED_MSM] Auto-flushing batch (reached max size: {})", 
-                      self.max_batch_size);
+        if self.operations.len() >= self.config.max_batch_size {
+            log::debug!("⚠️ [BATCHED_MSM] Auto-flushing batch (reached max size: {})", 
+                      self.config.max_batch_size);
+            self.flush_batch();
         }
     }
 
@@ -72,6 +140,11 @@ impl<C: CurveAffine> BatchedMSM<C> {
     /// Check if there are pending operations
     pub fn has_pending(&self) -> bool {
         !self.operations.is_empty()
+    }
+
+    /// Get current batch statistics
+    pub fn get_stats(&self) -> &BatchedMSMStats {
+        &self.stats
     }
 
     /// Process all pending MSM operations in a single batched call
@@ -88,146 +161,181 @@ impl<C: CurveAffine> BatchedMSM<C> {
         log::info!("🚀 [BATCHED_MSM] Processing batch for {}: {} operations, {} total elements", 
                    self.current_phase, batch_size, total_elements);
 
-        let start_time = std::time::Instant::now();
+        let start_time = Instant::now();
 
-        // Collect all operations
-        let operations: Vec<_> = self.operations.drain(..).collect();
+        // Sort operations by priority (higher priority first)
+        let mut operations: Vec<_> = self.operations.drain(..).collect();
+        operations.sort_by(|a, b| b.priority.cmp(&a.priority));
+
         let operation_ids: Vec<_> = operations.iter()
             .map(|op| op.operation_id.clone())
             .collect();
 
-        // Determine if we should use batched GPU processing
-        let results = if total_elements > 1024 && batch_size > 1 {
+        // Determine processing strategy
+        let (results, used_gpu) = if self.should_use_gpu_batching(&operations, total_elements) {
             self.process_batched_gpu(&operations)
         } else {
             self.process_individual(&operations)
         };
 
-        let elapsed = start_time.elapsed();
-        log::info!("⚡ [BATCHED_MSM] Batch completed: {} operations in {:?} ({:.2} ops/ms, {:.2} elements/ms)", 
-                   batch_size, elapsed, 
-                   batch_size as f64 / elapsed.as_millis() as f64,
-                   total_elements as f64 / elapsed.as_millis() as f64);
+        let processing_time = start_time.elapsed();
+        
+        // Update statistics
+        self.stats.total_batches += 1;
+        if used_gpu {
+            self.stats.total_gpu_batches += 1;
+        } else {
+            self.stats.total_cpu_batches += 1;
+        }
+        self.stats.total_processing_time += processing_time;
+
+        log::info!("✅ [BATCHED_MSM] Batch completed in {:?} (GPU: {})", 
+                   processing_time, used_gpu);
 
         Some(BatchedResult {
             results,
             operation_ids,
+            total_elements,
+            processing_time,
+            used_gpu,
         })
     }
 
-    /// Process operations using batched GPU MSM
-    fn process_batched_gpu(&self, operations: &[MSMOperation<C>]) -> Vec<C::Curve> {
-        log::debug!("🔄 [BATCHED_MSM] Using batched GPU processing");
-
-        // Calculate total size and offsets
-        let mut total_coeffs = Vec::new();
-        let mut total_bases = Vec::new();
-        let mut offsets = Vec::new();
-        let mut current_offset = 0;
-
-        for op in operations {
-            offsets.push((current_offset, current_offset + op.coeffs.len()));
-            total_coeffs.extend_from_slice(&op.coeffs);
-            total_bases.extend_from_slice(&op.bases);
-            current_offset += op.coeffs.len();
+    /// Determine if we should use GPU batching
+    fn should_use_gpu_batching(&self, operations: &[MSMOperation<C>], total_elements: usize) -> bool {
+        if !self.config.force_gpu_for_large_batches {
+            return false;
         }
 
-        // Perform single large MSM operation
-        let combined_result = best_multiexp(&total_coeffs, &total_bases);
+        let batch_size = operations.len();
+        total_elements >= self.config.gpu_threshold && 
+        batch_size >= self.config.gpu_batch_threshold
+    }
 
-        // For now, we need to split the result back to individual operations
-        // This is a simplified approach - in practice, we'd need more sophisticated
-        // batching at the GPU kernel level
-        let mut results = Vec::new();
-        for (i, (start, end)) in offsets.iter().enumerate() {
-            let individual_result = best_multiexp(
-                &total_coeffs[*start..*end],
-                &total_bases[*start..*end]
-            );
-            results.push(individual_result);
-            
-            log::debug!("✅ [BATCHED_MSM] Operation {}: {} elements processed", 
-                       operations[i].operation_id, end - start);
-        }
-
-        results
+    /// Process operations using batched GPU approach
+    fn process_batched_gpu(&self, operations: &[MSMOperation<C>]) -> (Vec<C::Curve>, bool) {
+        log::info!("🚀 [BATCHED_MSM_GPU] Processing {} operations on GPU", operations.len());
+        
+        // For now, fall back to individual processing
+        // TODO: Implement actual GPU batching when icicle supports it
+        let results = self.process_individual(operations);
+        (results, false) // GPU not actually used yet
     }
 
     /// Process operations individually (fallback)
     fn process_individual(&self, operations: &[MSMOperation<C>]) -> Vec<C::Curve> {
-        log::debug!("🔄 [BATCHED_MSM] Using individual processing (fallback)");
-
+        log::debug!("🔄 [BATCHED_MSM_CPU] Processing {} operations individually", operations.len());
+        
         operations.iter().map(|op| {
             best_multiexp(&op.coeffs, &op.bases)
         }).collect()
     }
+
+    /// Force flush all pending operations
+    pub fn force_flush(&mut self) -> Option<BatchedResult<C>> {
+        if self.operations.is_empty() {
+            return None;
+        }
+        
+        log::warn!("⚠️ [BATCHED_MSM] Force flushing {} pending operations", 
+                   self.operations.len());
+        self.flush_batch()
+    }
 }
 
-/// Global batched MSM manager for coordinating across phases
-pub struct BatchedMSMManager<C: CurveAffine> {
+/// Global batched MSM manager for coordinating operations across phases
+#[derive(Debug)]
+pub struct BatchedMsmManager<C: CurveAffine> {
     current_batch: Mutex<Option<BatchedMSM<C>>>,
+    config: BatchedMSMConfig,
 }
 
-impl<C: CurveAffine> BatchedMSMManager<C> {
-    pub fn new() -> Self {
+impl<C: CurveAffine> BatchedMsmManager<C> {
+    /// Create a new global batched MSM manager
+    pub fn new(config: BatchedMSMConfig) -> Self {
+        log::info!("🔄 [BATCHED_MSM_MANAGER] Initializing with config: {:?}", config);
         Self {
             current_batch: Mutex::new(None),
+            config,
         }
     }
 
-    /// Start a new batch for a specific phase
-    pub fn start_phase_batch(&self, phase_name: &str, max_batch_size: usize) {
-        let mut batch = self.current_batch.lock().unwrap();
-        *batch = Some(BatchedMSM::new(phase_name, max_batch_size));
+    /// Start a new batch phase
+    pub fn start_phase_batch(&self, phase_name: &str) {
+        let mut current = self.current_batch.lock().unwrap();
+        
+        // Flush any existing batch
+        if let Some(ref mut batch) = *current {
+            if let Some(result) = batch.force_flush() {
+                log::info!("🔄 [BATCHED_MSM_MANAGER] Flushed previous phase: {:?}", result);
+            }
+        }
+        
+        *current = Some(BatchedMSM::new(phase_name, self.config.clone()));
+        log::info!("🔄 [BATCHED_MSM_MANAGER] Started new phase: {}", phase_name);
     }
 
-    /// Add operation to current batch
+    /// Add an operation to the current batch
     pub fn add_to_batch(
         &self,
         coeffs: Vec<C::Scalar>,
         bases: Vec<C>,
         operation_id: String,
+        priority: u8,
     ) -> Option<C::Curve> {
-        let mut batch_guard = self.current_batch.lock().unwrap();
-        if let Some(batch) = batch_guard.as_mut() {
-            batch.add_operation(coeffs, bases, operation_id);
-            None // Return None to indicate batched processing
+        if !self.config.enabled {
+            // If batching is disabled, process immediately
+            return Some(best_multiexp(&coeffs, &bases));
+        }
+
+        let mut current = self.current_batch.lock().unwrap();
+        if let Some(ref mut batch) = *current {
+            batch.add_operation(coeffs, bases, operation_id, priority);
+            None // Result will be available after flush
         } else {
             // No active batch, process immediately
-            drop(batch_guard);
             Some(best_multiexp(&coeffs, &bases))
         }
     }
 
-    /// Flush current batch and return results
+    /// Flush the current batch
     pub fn flush_current_batch(&self) -> Option<BatchedResult<C>> {
-        let mut batch_guard = self.current_batch.lock().unwrap();
-        if let Some(batch) = batch_guard.as_mut() {
+        let mut current = self.current_batch.lock().unwrap();
+        if let Some(ref mut batch) = *current {
             batch.flush_batch()
         } else {
             None
         }
     }
 
-    /// End current batch
+    /// End the current phase and flush
     pub fn end_phase_batch(&self) -> Option<BatchedResult<C>> {
-        let mut batch_guard = self.current_batch.lock().unwrap();
-        if let Some(mut batch) = batch_guard.take() {
-            batch.flush_batch()
+        let mut current = self.current_batch.lock().unwrap();
+        if let Some(ref mut batch) = *current {
+            let result = batch.force_flush();
+            *current = None;
+            result
         } else {
             None
         }
+    }
+
+    /// Get current batch statistics
+    pub fn get_stats(&self) -> Option<BatchedMSMStats> {
+        let current = self.current_batch.lock().unwrap();
+        current.as_ref().map(|batch| batch.get_stats().clone())
     }
 }
 
-/// Tracks pending commitment operations for batched processing
-#[derive(Debug, Clone)]
+/// Commitment tracker for batched operations
+#[derive(Debug)]
 pub struct BatchCommitmentTracker<C: CurveAffine> {
     pending_operations: HashMap<String, Blind<C::Scalar>>,
     completed_commitments: HashMap<String, C>,
 }
 
 impl<C: CurveAffine> BatchCommitmentTracker<C> {
+    /// Create a new commitment tracker
     pub fn new() -> Self {
         Self {
             pending_operations: HashMap::new(),
@@ -235,35 +343,40 @@ impl<C: CurveAffine> BatchCommitmentTracker<C> {
         }
     }
 
+    /// Register a pending commitment operation
     pub fn register_pending(&mut self, operation_id: String, blind: Blind<C::Scalar>) {
         self.pending_operations.insert(operation_id, blind);
     }
 
-    pub fn process_batch_results(&mut self, batch_result: BatchResult<C>) {
-        for (operation_id, commitment) in batch_result.commitments {
-            self.completed_commitments.insert(operation_id, commitment);
+    /// Process batch results and store commitments
+    pub fn process_batch_results(&mut self, batch_result: BatchedResult<C>) {
+        for (operation_id, commitment) in batch_result.operation_ids.iter()
+            .zip(batch_result.results.iter()) {
+            self.completed_commitments.insert(operation_id.clone(), commitment.to_affine());
         }
     }
 
+    /// Get a completed commitment
     pub fn get_commitment(&self, operation_id: &str) -> Option<C> {
         self.completed_commitments.get(operation_id).copied()
     }
 
+    /// Clear all tracked operations
     pub fn clear(&mut self) {
         self.pending_operations.clear();
         self.completed_commitments.clear();
     }
 }
 
-/// Result of a batched commitment operation
-#[derive(Debug, Clone)]
+/// Result of a batch operation
+#[derive(Debug)]
 pub struct BatchResult<C: CurveAffine> {
     pub commitments: HashMap<String, C>,
     pub total_time: std::time::Duration,
     pub operation_count: usize,
 }
 
-/// Trait for commitment schemes that support batched operations
+/// Trait for prover parameters that support batched operations
 pub trait BatchedParamsProver<C: CurveAffine> {
     /// Start a new batch phase for collecting operations
     fn start_batch_phase(&self, phase_name: &str);
@@ -286,101 +399,95 @@ pub trait BatchedParamsProver<C: CurveAffine> {
     fn current_batch_size(&self) -> usize;
 }
 
-/// Batch operation descriptor
-#[derive(Debug, Clone)]
+/// Individual batch operation
+#[derive(Debug)]
 pub struct BatchOperation<C: CurveAffine> {
     pub operation_id: String,
     pub polynomial: Polynomial<C::Scalar, LagrangeCoeff>,
     pub blind: Blind<C::Scalar>,
 }
 
-/// Batched MSM operation manager
-#[derive(Debug)]
-pub struct BatchedMsmManager<C: CurveAffine> {
-    current_phase: Option<String>,
-    pending_operations: Vec<BatchOperation<C>>,
-    batch_threshold: usize,
-    force_gpu_threshold: usize,
-}
-
-impl<C: CurveAffine> BatchedMsmManager<C> {
-    pub fn new() -> Self {
-        Self {
-            current_phase: None,
-            pending_operations: Vec::new(),
-            batch_threshold: 4, // Minimum operations to trigger batching
-            force_gpu_threshold: 8, // Force GPU usage above this threshold
-        }
-    }
-
-    pub fn start_phase(&mut self, phase_name: String) {
-        self.current_phase = Some(phase_name);
-        self.pending_operations.clear();
-    }
-
-    pub fn add_operation(&mut self, operation: BatchOperation<C>) {
-        self.pending_operations.push(operation);
-    }
-
-    pub fn should_use_gpu(&self) -> bool {
-        self.pending_operations.len() >= self.force_gpu_threshold
-    }
-
-    pub fn should_batch(&self) -> bool {
-        self.pending_operations.len() >= self.batch_threshold
-    }
-
-    pub fn get_operations(&self) -> &[BatchOperation<C>] {
-        &self.pending_operations
-    }
-
-    pub fn clear_operations(&mut self) {
-        self.pending_operations.clear();
-    }
-
-    pub fn end_phase(&mut self) -> Option<String> {
-        let phase = self.current_phase.take();
-        self.pending_operations.clear();
-        phase
-    }
-}
-
-// Global instance for managing batched MSM operations
+/// Global batched MSM manager instance
 lazy_static::lazy_static! {
-    pub static ref GLOBAL_BATCHED_MSM: BatchedMSMManager<halo2curves::bn256::G1Affine> = 
-        BatchedMSMManager::new();
+    static ref GLOBAL_BATCHED_MSM: Mutex<Option<BatchedMsmManager<halo2curves::bn256::G1Affine>>> = 
+        Mutex::new(None);
+}
+
+/// Initialize the global batched MSM manager
+pub fn init_global_batched_msm<C: CurveAffine>(config: BatchedMSMConfig) {
+    let mut global = GLOBAL_BATCHED_MSM.lock().unwrap();
+    *global = Some(BatchedMsmManager::new(config));
+    log::info!("🔄 [GLOBAL_BATCHED_MSM] Initialized global manager");
+}
+
+/// Get the global batched MSM manager
+pub fn get_global_batched_msm<C: CurveAffine>() -> Option<BatchedMsmManager<C>> {
+    let global = GLOBAL_BATCHED_MSM.lock().unwrap();
+    global.as_ref().map(|manager| {
+        // This is a simplified approach - in practice you'd want proper type conversion
+        BatchedMsmManager::new(BatchedMSMConfig::default())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use halo2curves::bn256::{Fr, G1Affine};
+    use halo2curves::bn256::G1Affine;
     use ff::Field;
-    use group::Curve;
-    use rand_core::OsRng;
 
     #[test]
     fn test_batched_msm_basic() {
-        let mut batch = BatchedMSM::<G1Affine>::new("test", 10);
+        let config = BatchedMSMConfig {
+            enabled: true,
+            max_batch_size: 4,
+            gpu_threshold: 100,
+            gpu_batch_threshold: 2,
+            force_gpu_for_large_batches: false,
+        };
+
+        let mut batched_msm = BatchedMSM::<G1Affine>::new("test_phase", config);
         
         // Add some test operations
-        let coeffs1 = vec![Fr::random(OsRng); 100];
-        let bases1 = vec![G1Affine::generator(); 100];
+        for i in 0..3 {
+            let coeffs = vec![G1Affine::Scalar::from(i as u64)];
+            let bases = vec![G1Affine::generator()];
+            batched_msm.add_operation(
+                coeffs,
+                bases,
+                format!("test_op_{}", i),
+                1,
+            );
+        }
+
+        // Flush the batch
+        let result = batched_msm.flush_batch();
+        assert!(result.is_some());
         
-        let coeffs2 = vec![Fr::random(OsRng); 50];
-        let bases2 = vec![G1Affine::generator(); 50];
+        let result = result.unwrap();
+        assert_eq!(result.results.len(), 3);
+        assert_eq!(result.operation_ids.len(), 3);
+    }
 
-        batch.add_operation(coeffs1.clone(), bases1.clone(), "op1".to_string());
-        batch.add_operation(coeffs2.clone(), bases2.clone(), "op2".to_string());
+    #[test]
+    fn test_batched_msm_disabled() {
+        let config = BatchedMSMConfig {
+            enabled: false,
+            ..Default::default()
+        };
 
-        assert_eq!(batch.pending_count(), 2);
-        assert!(batch.has_pending());
-
-        let result = batch.flush_batch().unwrap();
-        assert_eq!(result.results.len(), 2);
-        assert_eq!(result.operation_ids, vec!["op1", "op2"]);
+        let mut batched_msm = BatchedMSM::<G1Affine>::new("test_phase", config);
         
-        assert_eq!(batch.pending_count(), 0);
-        assert!(!batch.has_pending());
+        // Operations should be processed immediately when batching is disabled
+        let coeffs = vec![G1Affine::Scalar::from(1u64)];
+        let bases = vec![G1Affine::generator()];
+        batched_msm.add_operation(
+            coeffs,
+            bases,
+            "test_op".to_string(),
+            1,
+        );
+
+        // No pending operations when batching is disabled
+        assert_eq!(batched_msm.pending_count(), 0);
     }
 }

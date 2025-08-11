@@ -530,6 +530,20 @@ pub fn reset_fft_stats() {
     FFT_CPU_COUNTER.store(0, Ordering::Relaxed);
 }
 
+/// Record GPU MSM statistics (called from batched operations)
+pub fn record_msm_gpu(count: u32, duration: Duration) {
+    MSM_COUNTER.fetch_add(count as usize, Ordering::Relaxed);
+    MSM_GPU_COUNTER.fetch_add(count as usize, Ordering::Relaxed);
+    *MSM_TOTAL_TIME.lock().unwrap() += duration;
+}
+
+/// Record CPU MSM statistics (called from batched operations)
+pub fn record_msm_cpu(count: u32, duration: Duration) {
+    MSM_COUNTER.fetch_add(count as usize, Ordering::Relaxed);
+    MSM_CPU_COUNTER.fetch_add(count as usize, Ordering::Relaxed);
+    *MSM_TOTAL_TIME.lock().unwrap() += duration;
+}
+
 #[test]
 fn test_lagrange_interpolate() {
     let rng = OsRng;
