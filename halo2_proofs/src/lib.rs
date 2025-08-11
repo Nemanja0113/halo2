@@ -47,6 +47,7 @@ pub mod dev;
 mod helpers;
 pub use helpers::SerdeFormat;
 pub use helpers::SerdePrimeField;
+pub use plonk::prover_batched::create_proof_batched;
 
 #[cfg(feature = "icicle_gpu")]
 #[allow(unsafe_code)]

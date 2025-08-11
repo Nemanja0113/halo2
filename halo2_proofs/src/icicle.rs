@@ -76,22 +76,30 @@ fn c_from_icicle_point<C: CurveAffine>(point: &G1Projective) -> C::Curve {
     return affine.unwrap().to_curve();
 }
 
+/// This is the core GPU MSM implementation that gets called from best_multiexp_gpu
 pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+    // Convert halo2 scalars to ICICLE format
     let binding = icicle_scalars_from_c_scalars::<C::ScalarExt>(coeffs);
     let coeffs = HostSlice::from_slice(&binding[..]);
+    
+    // Convert halo2 curve points to ICICLE format
     let binding = icicle_points_from_c(bases);
     let bases = HostSlice::from_slice(&binding[..]);
 
+    // Allocate GPU memory for result
     let mut msm_results = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
     let cfg = msm::MSMConfig::default();
 
+    // Perform the actual MSM computation on GPU
     msm::msm(coeffs, bases, &cfg, &mut msm_results[..]).unwrap();
 
+    // Copy result back to host
     let mut msm_host_result = vec![G1Projective::zero(); 1];
     msm_results
         .copy_to_host(HostSlice::from_mut_slice(&mut msm_host_result[..]))
         .unwrap();
 
+    // Convert result back to halo2 format
     let msm_point = c_from_icicle_point::<C>(&msm_host_result[0]);
 
     msm_point
