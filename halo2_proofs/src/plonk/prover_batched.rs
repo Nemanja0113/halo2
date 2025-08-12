@@ -428,7 +428,7 @@ where
                     
                     params.commit_lagrange_batched(
                         &Polynomial {
-                            values: advice_values.clone(),
+                            values: advice_values.clone().values,
                             _marker: std::marker::PhantomData,
                         },
                         *blind,

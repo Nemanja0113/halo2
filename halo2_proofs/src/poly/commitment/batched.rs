@@ -49,7 +49,7 @@ pub struct MSMOperation<C: CurveAffine> {
 /// Result of a batched MSM operation
 #[derive(Debug)]
 pub struct BatchedResult<C: CurveAffine> {
-    pub results: Vec<C::Curve>,
+    pub results: Vec<C::CurveExt>,
     pub operation_ids: Vec<String>,
     pub total_elements: usize,
     pub processing_time: Duration,
