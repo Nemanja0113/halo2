@@ -3,8 +3,8 @@ use ff::Field;
 use group::Curve;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use super::{Blind, Polynomial, LagrangeCoeff};
-use instant::Instant;
 
 use lazy_static::lazy_static;
 
@@ -51,7 +51,7 @@ pub struct BatchedResult<C: CurveAffine> {
     pub results: Vec<C::Curve>,
     pub operation_ids: Vec<String>,
     pub total_elements: usize,
-    pub processing_time: std::time::Duration,
+    pub processing_time: Duration,
     pub used_gpu: bool,
 }
 
@@ -76,7 +76,7 @@ pub struct BatchedMSMStats {
     pub total_batches: usize,
     pub total_gpu_batches: usize,
     pub total_cpu_batches: usize,
-    pub total_processing_time: std::time::Duration,
+    pub total_processing_time: Duration,
 }
 
 impl<C: CurveAffine> BatchedMSM<C> {
@@ -372,7 +372,7 @@ impl<C: CurveAffine> BatchCommitmentTracker<C> {
 #[derive(Debug)]
 pub struct BatchResult<C: CurveAffine> {
     pub commitments: HashMap<String, C>,
-    pub total_time: std::time::Duration,
+    pub total_time: Duration,
     pub operation_count: usize,
 }
 
