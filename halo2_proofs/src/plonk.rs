@@ -34,6 +34,7 @@ mod shuffle;
 mod vanishing;
 
 mod prover;
+mod prover_batched;
 mod verifier;
 
 pub use assigned::*;
@@ -41,6 +42,7 @@ pub use circuit::*;
 pub use error::*;
 pub use keygen::*;
 pub use prover::*;
+pub use prover_batched::*;
 pub use verifier::*;
 
 use evaluation::Evaluator;
