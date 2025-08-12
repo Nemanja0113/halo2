@@ -501,14 +501,14 @@ where
 
     #[cfg(feature = "mv-lookup")]
     let lookups: Vec<Vec<lookup::prover::Prepared<Scheme::Curve>>> = instance
-        .par_iter()
-        .zip(advice.par_iter())
+        .iter()
+        .zip(advice.iter())
         .enumerate()
         .map(|(circuit_idx, (instance, advice))| -> Result<Vec<_>, Error> {
             pk.vk
                 .cs
                 .lookups
-                .par_iter()
+                .iter()
                 .enumerate()
                 .map(|(lookup_idx, lookup)| {
                     let operation_id = format!("lookup_prep_{}_{}", circuit_idx, lookup_idx);
