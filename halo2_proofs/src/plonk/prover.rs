@@ -103,7 +103,7 @@ where
         force_gpu_for_large_batches: std::env::var("HALO2_MSM_FORCE_GPU").is_ok(),
     };
 
-    let batched_msm_manager: BatchedMsmManager<C> = BatchedMsmManager::new(batched_config);
+    let batched_msm_manager: BatchedMsmManager<Scheme::Curve> = BatchedMsmManager::new(batched_config);
     
     if batched_config.enabled {
         log::info!("🚀 [BATCHING] MSM batching enabled with config: {:?}", batched_config);
@@ -1029,7 +1029,7 @@ where
             log::info!("📊 [BATCHED_MSM_STATS] Total processing time: {:?} ({:.2}% of total)", 
                        stats.total_processing_time, 
                        (stats.total_processing_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 100.0);
-            if stats.total_batches > 0 {
+            if stats.total_batches > 0_usize {
                 log::info!("📊 [BATCHED_MSM_STATS] Average batch time: {:?}", 
                            stats.total_processing_time / stats.total_batches as u32);
             }

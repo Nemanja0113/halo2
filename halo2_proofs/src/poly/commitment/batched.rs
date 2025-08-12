@@ -219,7 +219,7 @@ impl<C: CurveAffine> BatchedMSM<C> {
         
         // For now, fall back to individual processing
         // TODO: Implement actual GPU batching when icicle supports it
-        let results = self.process_individual(operations);
+        let (results, _) = self.process_individual(operations);
         (results, false) // GPU not actually used yet
     }
 

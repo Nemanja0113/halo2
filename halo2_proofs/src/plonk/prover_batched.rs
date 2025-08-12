@@ -44,6 +44,7 @@ use crate::{
     poly::batch_invert_assigned,
     transcript::{EncodedChallenge, TranscriptWrite},
 };
+use crate::poly::commitment::batched::BatchedResult;
 use group::prime::PrimeCurveAffine;
 
 /// Enhanced proof creation with batched MSM operations
@@ -141,12 +142,15 @@ where
 
                 // Process batch and get results
                 if let Some(batch_result) = params.end_batch_phase() {
+                    // Convert BatchResult to BatchedResult format
+                    let commitments: Vec<_> = batch_result.commitments.values().cloned().collect();
+                    let operation_ids: Vec<_> = batch_result.commitments.keys().cloned().collect();
                     commitment_tracker.process_batch_results(BatchedResult {
-                        results: batch_result.results,
-                        operation_ids: batch_result.operation_ids,
-                        total_elements: batch_result.total_elements,
-                        processing_time: batch_result.processing_time,
-                        used_gpu: batch_result.used_gpu,
+                        results: commitments,
+                        operation_ids,
+                        total_elements: batch_result.operation_count,
+                        processing_time: batch_result.total_time,
+                        used_gpu: false, // We don't track GPU usage in BatchResult
                     });
                 }
 
@@ -424,7 +428,7 @@ where
                     
                     params.commit_lagrange_batched(
                         &Polynomial {
-                            values: advice_values.clone().into_iter().collect(),
+                            values: advice_values.clone(),
                             _marker: std::marker::PhantomData,
                         },
                         *blind,
@@ -447,12 +451,15 @@ where
             // Process batched advice commitments
             let batch_start = Instant::now();
             if let Some(batch_result) = params.end_batch_phase() {
+                // Convert BatchResult to BatchedResult format
+                let commitments: Vec<_> = batch_result.commitments.values().cloned().collect();
+                let operation_ids: Vec<_> = batch_result.commitments.keys().cloned().collect();
                 commitment_tracker.process_batch_results(BatchedResult {
-                    results: batch_result.results,
-                    operation_ids: batch_result.operation_ids,
-                    total_elements: batch_result.total_elements,
-                    processing_time: batch_result.processing_time,
-                    used_gpu: batch_result.used_gpu,
+                    results: commitments,
+                    operation_ids,
+                    total_elements: batch_result.operation_count,
+                    processing_time: batch_result.total_time,
+                    used_gpu: false, // We don't track GPU usage in BatchResult
                 });
                 
                 // Write commitments to transcript
@@ -556,12 +563,15 @@ where
 
     // Process batched lookup commitments
     if let Some(batch_result) = params.end_batch_phase() {
+        // Convert BatchResult to BatchedResult format
+        let commitments: Vec<_> = batch_result.commitments.values().cloned().collect();
+        let operation_ids: Vec<_> = batch_result.commitments.keys().cloned().collect();
         lookup_commitment_tracker.process_batch_results(BatchedResult {
-            results: batch_result.results,
-            operation_ids: batch_result.operation_ids,
-            total_elements: batch_result.total_elements,
-            processing_time: batch_result.processing_time,
-            used_gpu: batch_result.used_gpu,
+            results: commitments,
+            operation_ids,
+            total_elements: batch_result.operation_count,
+            processing_time: batch_result.total_time,
+            used_gpu: false, // We don't track GPU usage in BatchResult
         });
         
         #[cfg(feature = "mv-lookup")]
