@@ -143,7 +143,7 @@ where
                 // Process batch and get results
                 if let Some(batch_result) = params.end_batch_phase() {
                     // Convert BatchResult to BatchedResult format
-                    let commitments: Vec<_> = batch_result.commitments.values().cloned().collect();
+                    let commitments: Vec<_> = batch_result.commitments.values().map(|c| c.to_curve()).collect();
                     let operation_ids: Vec<_> = batch_result.commitments.keys().cloned().collect();
                     commitment_tracker.process_batch_results(BatchedResult::<Scheme::Curve> {
                         results: commitments,
@@ -449,7 +449,7 @@ where
             let batch_start = Instant::now();
             if let Some(batch_result) = params.end_batch_phase() {
                 // Convert BatchResult to BatchedResult format
-                let commitments: Vec<_> = batch_result.commitments.values().cloned().collect();
+                let commitments: Vec<_> = batch_result.commitments.values().map(|c| c.to_curve()).collect();
                 let operation_ids: Vec<_> = batch_result.commitments.keys().cloned().collect();
                 commitment_tracker.process_batch_results(BatchedResult::<Scheme::Curve> {
                     results: commitments,
@@ -561,7 +561,7 @@ where
     // Process batched lookup commitments
     if let Some(batch_result) = params.end_batch_phase() {
         // Convert BatchResult to BatchedResult format
-        let commitments: Vec<_> = batch_result.commitments.values().cloned().collect();
+        let commitments: Vec<_> = batch_result.commitments.values().map(|c| c.to_curve()).collect();
         let operation_ids: Vec<_> = batch_result.commitments.keys().cloned().collect();
         lookup_commitment_tracker.process_batch_results(BatchedResult::<Scheme::Curve> {
             results: commitments,
