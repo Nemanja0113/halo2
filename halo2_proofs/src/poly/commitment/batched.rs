@@ -4,7 +4,7 @@ use group::Curve;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use super::{Blind, Polynomial, LagrangeCoeff};
+use crate::poly::{Blind, Polynomial, LagrangeCoeff};
 
 use lazy_static::lazy_static;
 

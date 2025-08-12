@@ -34,7 +34,7 @@ mod shuffle;
 mod vanishing;
 
 mod prover;
-mod prover_batched;
+pub mod prover_batched;
 mod verifier;
 
 pub use assigned::*;

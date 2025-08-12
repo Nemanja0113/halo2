@@ -882,7 +882,6 @@ where
     log::info!("📊 [BATCHED_FFT_STATS] Total FFT operations: {} (GPU: {}, CPU: {})", 
                total_fft_count, fft_gpu_count, fft_cpu_count);
     log::info!("📊 [BATCHED_FFT_STATS] Total FFT time: {:?} ({:.2}% of total)", 
-               total_fft_time, (total_fft_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 
                total_fft_time, (total_fft_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 100.0);
     if total_fft_count > 0 {
         log::info!("📊 [BATCHED_FFT_STATS] Average FFT time: {:?}", total_fft_time / total_fft_count as u32);
