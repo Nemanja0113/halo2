@@ -4,7 +4,8 @@ use group::Curve;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use crate::poly::{Blind, Polynomial, LagrangeCoeff};
+use crate::poly::{Polynomial, LagrangeCoeff};
+use super::Blind;
 
 use lazy_static::lazy_static;
 
@@ -113,6 +114,7 @@ impl<C: CurveAffine> BatchedMSM<C> {
         log::debug!("📝 [BATCHED_MSM] Adding operation '{}': {} elements (priority: {})", 
                    operation_id, coeffs.len(), priority);
         
+        self.stats.total_elements += coeffs.len();
         self.operations.push_back(MSMOperation {
             coeffs,
             bases,
@@ -122,7 +124,6 @@ impl<C: CurveAffine> BatchedMSM<C> {
         });
 
         self.stats.total_operations += 1;
-        self.stats.total_elements += coeffs.len();
 
         // Auto-flush if we hit the batch size limit
         if self.operations.len() >= self.config.max_batch_size {
@@ -223,12 +224,13 @@ impl<C: CurveAffine> BatchedMSM<C> {
     }
 
     /// Process operations individually (fallback)
-    fn process_individual(&self, operations: &[MSMOperation<C>]) -> Vec<C::Curve> {
+    fn process_individual(&self, operations: &[MSMOperation<C>]) -> (Vec<C::Curve>, bool) {
         log::debug!("🔄 [BATCHED_MSM_CPU] Processing {} operations individually", operations.len());
         
-        operations.iter().map(|op| {
+        let results = operations.iter().map(|op| {
             best_multiexp(&op.coeffs, &op.bases)
-        }).collect()
+        }).collect();
+        (results, false) // false indicates GPU was not used
     }
 
     /// Force flush all pending operations

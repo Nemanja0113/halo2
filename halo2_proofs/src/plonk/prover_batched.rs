@@ -141,7 +141,13 @@ where
 
                 // Process batch and get results
                 if let Some(batch_result) = params.end_batch_phase() {
-                    commitment_tracker.process_batch_results(batch_result);
+                    commitment_tracker.process_batch_results(BatchedResult {
+                        results: batch_result.results,
+                        operation_ids: batch_result.operation_ids,
+                        total_elements: batch_result.total_elements,
+                        processing_time: batch_result.processing_time,
+                        used_gpu: batch_result.used_gpu,
+                    });
                 }
 
                 // Write commitments to transcript
@@ -418,7 +424,7 @@ where
                     
                     params.commit_lagrange_batched(
                         &Polynomial {
-                            values: advice_values.clone(),
+                            values: advice_values.clone().into_iter().collect(),
                             _marker: std::marker::PhantomData,
                         },
                         *blind,
@@ -441,7 +447,13 @@ where
             // Process batched advice commitments
             let batch_start = Instant::now();
             if let Some(batch_result) = params.end_batch_phase() {
-                commitment_tracker.process_batch_results(batch_result);
+                commitment_tracker.process_batch_results(BatchedResult {
+                    results: batch_result.results,
+                    operation_ids: batch_result.operation_ids,
+                    total_elements: batch_result.total_elements,
+                    processing_time: batch_result.processing_time,
+                    used_gpu: batch_result.used_gpu,
+                });
                 
                 // Write commitments to transcript
                 for circuit_idx in 0..circuits.len() {
@@ -544,7 +556,13 @@ where
 
     // Process batched lookup commitments
     if let Some(batch_result) = params.end_batch_phase() {
-        lookup_commitment_tracker.process_batch_results(batch_result);
+        lookup_commitment_tracker.process_batch_results(BatchedResult {
+            results: batch_result.results,
+            operation_ids: batch_result.operation_ids,
+            total_elements: batch_result.total_elements,
+            processing_time: batch_result.processing_time,
+            used_gpu: batch_result.used_gpu,
+        });
         
         #[cfg(feature = "mv-lookup")]
         {

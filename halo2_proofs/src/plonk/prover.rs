@@ -103,7 +103,7 @@ where
         force_gpu_for_large_batches: std::env::var("HALO2_MSM_FORCE_GPU").is_ok(),
     };
 
-    let batched_msm_manager = BatchedMsmManager::new(batched_config);
+    let batched_msm_manager: BatchedMsmManager<C> = BatchedMsmManager::new(batched_config);
     
     if batched_config.enabled {
         log::info!("🚀 [BATCHING] MSM batching enabled with config: {:?}", batched_config);
