@@ -145,7 +145,7 @@ where
                     // Convert BatchResult to BatchedResult format
                     let commitments: Vec<_> = batch_result.commitments.values().cloned().collect();
                     let operation_ids: Vec<_> = batch_result.commitments.keys().cloned().collect();
-                    commitment_tracker.process_batch_results(BatchedResult {
+                    commitment_tracker.process_batch_results(BatchedResult::<Scheme::Curve> {
                         results: commitments,
                         operation_ids,
                         total_elements: batch_result.operation_count,
@@ -427,10 +427,7 @@ where
                     commitment_tracker.register_pending(operation_id.clone(), *blind);
                     
                     params.commit_lagrange_batched(
-                        &Polynomial {
-                            values: advice_values.clone().values,
-                            _marker: std::marker::PhantomData,
-                        },
+                        advice_values,
                         *blind,
                         operation_id,
                     );
@@ -454,7 +451,7 @@ where
                 // Convert BatchResult to BatchedResult format
                 let commitments: Vec<_> = batch_result.commitments.values().cloned().collect();
                 let operation_ids: Vec<_> = batch_result.commitments.keys().cloned().collect();
-                commitment_tracker.process_batch_results(BatchedResult {
+                commitment_tracker.process_batch_results(BatchedResult::<Scheme::Curve> {
                     results: commitments,
                     operation_ids,
                     total_elements: batch_result.operation_count,
@@ -566,7 +563,7 @@ where
         // Convert BatchResult to BatchedResult format
         let commitments: Vec<_> = batch_result.commitments.values().cloned().collect();
         let operation_ids: Vec<_> = batch_result.commitments.keys().cloned().collect();
-        lookup_commitment_tracker.process_batch_results(BatchedResult {
+        lookup_commitment_tracker.process_batch_results(BatchedResult::<Scheme::Curve> {
             results: commitments,
             operation_ids,
             total_elements: batch_result.operation_count,
